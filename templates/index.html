@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scheduler Algorithm Visualizer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="title">
+            <h1>Scheduler Algorithm Visualizer</h1>
+        </header>
+
+        <nav class="nav">
+            <ul>
+                <li><a href="#" data-algo="FCFS Non-Preemptive">FCFS Non-Preemptive</a></li>
+                <li><a href="#" data-algo="FCFS Preemptive">FCFS Preemptive</a></li>
+                <li><a href="#" data-algo="SJF Non-Preemptive">SJF Non-Preemptive</a></li>
+                <li><a href="#" data-algo="SJF Preemptive">SJF Preemptive</a></li>
+                <li><a href="#" data-algo="RR Non-Preemptive">RR Non-Preemptive</a></li>
+                <li><a href="#" data-algo="RR Preemptive">RR Preemptive</a></li>
+                <li><a href="#" data-algo="Priority Non-Preemptive">Priority Non-Preemptive</a></li>
+                <li><a href="#" data-algo="Priority Preemptive">Priority Preemptive</a></li>
+            </ul>
+        </nav>
+
+        <main class="visualizer">
+            <section class="input-section">
+                <h2>Input Processes</h2>
+                <form id="process-form">
+                    <table id="process-table">
+                        <thead>
+                            <tr>
+                                <th>Process</th>
+                                <th>Arrival Time</th>
+                                <th>Burst Time</th>
+                                <th class="priority-col">Priority</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="process-rows">
+                            <tr data-id="1">
+                                <td><input type="text" name="name1" value="P1"></td>
+                                <td><input type="number" name="arrival1" value="0" min="0"></td>
+                                <td><input type="number" name="burst1" value="5" min="1"></td>
+                                <td class="priority-col"><input type="number" name="priority1" value="1" min="1"></td>
+                                <td><button type="button" class="delete-btn">Delete</button></td>
+                            </tr>
+                            <tr data-id="2">
+                                <td><input type="text" name="name2" value="P2"></td>
+                                <td><input type="number" name="arrival2" value="2" min="0"></td>
+                                <td><input type="number" name="burst2" value="3" min="1"></td>
+                                <td class="priority-col"><input type="number" name="priority2" value="2" min="1"></td>
+                                <td><button type="button" class="delete-btn">Delete</button></td>
+                            </tr>
+                            <tr data-id="3">
+                                <td><input type="text" name="name3" value="P3"></td>
+                                <td><input type="number" name="arrival3" value="4" min="0"></td>
+                                <td><input type="number" name="burst3" value="4" min="1"></td>
+                                <td class="priority-col"><input type="number" name="priority3" value="3" min="1"></td>
+                                <td><button type="button" class="delete-btn">Delete</button></td>
+                            </tr>
+                            <tr data-id="4">
+                                <td><input type="text" name="name4" value="P4"></td>
+                                <td><input type="number" name="arrival4" value="6" min="0"></td>
+                                <td><input type="number" name="burst4" value="2" min="1"></td>
+                                <td class="priority-col"><input type="number" name="priority4" value="4" min="1"></td>
+                                <td><button type="button" class="delete-btn">Delete</button></td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="form-buttons">
+                        <div id="quantum-section" class="hidden">
+                            <label for="quantum">Time Quantum (for RR):</label>
+                            <input type="number" id="quantum" name="quantum" value="2" min="1">
+                        </div>
+                        <button type="button" id="add-process">Add Process</button>
+                        <button type="submit">Run</button>
+                    </div>
+                    <input type="hidden" id="algo" name="algo" value="FCFS Non-Preemptive">
+                </form>
+            </section>
+            <section class="output-section hidden">
+                <h2>Gantt Chart</h2>
+                <div id="gantt-chart"></div>
+                <div id="explanation">
+                    <h3>Understanding the Gantt Chart</h3>
+                    <div class="explanation-grid">
+                        <div id="algo-details"></div>
+                        <div id="default-details"></div>
+                    </div>
+                </div>
+                <div class="calculations">
+                    <div class="calc-times">
+                        <h2>Calculated Times</h2>
+                        <div id="calc-times-text"></div>
+                    </div>
+                    <div class="formulas">
+                        <h2>Formulas</h2>
+                        <div id="formulas-text"></div>
+                    </div>
+                </div>
+                <div class="calculated-table">
+                    <h2>Calculated Table</h2>
+                    <div id="metrics-table"></div>
+                </div>
+                <div class="graphs">
+                    <h2>Graphical Visualization</h2>
+                    <div class="graph-container">
+                        <div class="graph-item line-graph">
+                            <canvas id="line-chart"></canvas>
+                            <h4>Figure 1: Line Chart of Process Times</h4>
+                        </div>
+                        <div class="graph-item bar-graph">
+                            <canvas id="bar-chart"></canvas>
+                            <h4>Figure 2: Bar Chart of Process Times</h4>
+                        </div>
+                        <div class="graph-item pie-graph-bt">
+                            <canvas id="pie-chart-bt"></canvas>
+                            <h4>Figure 3: Pie Chart of Burst Time</h4>
+                        </div>
+                        <div class="graph-item pie-graph-ct">
+                            <canvas id="pie-chart-ct"></canvas>
+                            <h4>Figure 4: Pie Chart of Completion Time</h4>
+                        </div>
+                        <div class="graph-item pie-graph-tat">
+                            <canvas id="pie-chart-tat"></canvas>
+                            <h4>Figure 5: Pie Chart of Turnaround Time</h4>
+                        </div>
+                        <div class="graph-item pie-graph-wt">
+                            <canvas id="pie-chart-wt"></canvas>
+                            <h4>Figure 6: Pie Chart of Waiting Time</h4>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <p>© 2025 Scheduler Algorithm Visualizer Team | Daffodil International University</p>
+        </footer>
+    </div>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

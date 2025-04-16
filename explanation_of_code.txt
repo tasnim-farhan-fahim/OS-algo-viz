@@ -1,0 +1,2199 @@
+-----------------------------------------
+            ____app.py____
+-----------------------------------------
+import sys
+import subprocess
+from flask import Flask, render_template, request, jsonify
+import webbrowser
+import platform
+
+# Check and install Flask if not available
+try:
+    import flask
+except ImportError:
+    print("Flask not found. Installing Flask...")
+    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'flask'])
+    import flask
+
+app = Flask(__name__)
+
+def compute_schedule(algo, processes, quantum=None):
+    try:
+        if not processes:
+            raise ValueError("No processes provided")
+        for p in processes:
+            if p['burst'] <= 0:
+                raise ValueError(f"Invalid burst time for process {p['name']}")
+            if p['arrival'] < 0:
+                raise ValueError(f"Invalid arrival time for process {p['name']}")
+
+        timeline = []
+        current_time = 0
+        remaining = {p['name']: p['burst'] for p in processes}
+        ready_queue = sorted(processes, key=lambda x: (x['arrival'], x['name']))
+        completed = {}
+        total_burst = sum(p['burst'] for p in processes)
+
+        if algo == "FCFS Non-Preemptive":
+            for p in ready_queue:
+                if current_time < p['arrival']:
+                    current_time = p['arrival']
+                timeline.append([p['name'], current_time, current_time + p['burst']])
+                current_time += p['burst']
+                completed[p['name']] = current_time
+        elif algo == "FCFS Preemptive":
+            queue = ready_queue.copy()
+            while any(v > 0 for v in remaining.values()):
+                available = [p for p in queue if p['arrival'] <= current_time and remaining[p['name']] > 0]
+                if not available:
+                    current_time += 1
+                    continue
+                p = available[0]
+                run_time = min(quantum or 1, remaining[p['name']])
+                timeline.append([p['name'], current_time, current_time + run_time])
+                current_time += run_time
+                remaining[p['name']] -= run_time
+                if remaining[p['name']] <= 0:
+                    completed[p['name']] = current_time
+                    queue.remove(p)
+        elif algo == "SJF Non-Preemptive":
+            active_queue = []
+            while remaining or active_queue:
+                active_queue.extend([p for p in ready_queue if p['arrival'] <= current_time and p['name'] in remaining])
+                ready_queue = [p for p in ready_queue if p['arrival'] > current_time or p['name'] not in remaining]
+                if not active_queue:
+                    current_time += 1
+                    continue
+                p = min(active_queue, key=lambda x: x['burst'])
+                timeline.append([p['name'], current_time, current_time + p['burst']])
+                current_time += p['burst']
+                completed[p['name']] = current_time
+                del remaining[p['name']]
+                active_queue.remove(p)
+        elif algo == "SRTF":
+            queue = ready_queue.copy()
+            while any(v > 0 for v in remaining.values()):
+                available = [p for p in queue if p['arrival'] <= current_time and remaining[p['name']] > 0]
+                if not available:
+                    current_time += 1
+                    continue
+                p = min(available, key=lambda x: remaining[x['name']])
+                run_time = 1
+                timeline.append([p['name'], current_time, current_time + run_time])
+                current_time += run_time
+                remaining[p['name']] -= run_time
+                if remaining[p['name']] <= 0:
+                    completed[p['name']] = current_time
+                    queue.remove(p)
+        elif algo == "RR Non-Preemptive":
+            queue = ready_queue.copy()
+            while queue:
+                p = queue.pop(0)
+                if current_time < p['arrival']:
+                    current_time = p['arrival']
+                run_time = min(remaining[p['name']], quantum or 2)
+                timeline.append([p['name'], current_time, current_time + run_time])
+                current_time += run_time
+                remaining[p['name']] -= run_time
+                if remaining[p['name']] <= 0:
+                    completed[p['name']] = current_time
+                else:
+                    queue.append(p)
+        elif algo == "RR Preemptive":
+            queue = ready_queue.copy()
+            while any(v > 0 for v in remaining.values()):
+                available = [p for p in queue if p['arrival'] <= current_time and remaining[p['name']] > 0]
+                if not available:
+                    current_time += 1
+                    continue
+                p = queue.pop(0)
+                run_time = min(quantum or 2, remaining[p['name']])
+                timeline.append([p['name'], current_time, current_time + run_time])
+                current_time += run_time
+                remaining[p['name']] -= run_time
+                if remaining[p['name']] <= 0:
+                    completed[p['name']] = current_time
+                else:
+                    queue.append(p)
+        elif algo == "Priority Non-Preemptive":
+            active_queue = []
+            while remaining or active_queue:
+                active_queue.extend([p for p in ready_queue if p['arrival'] <= current_time and p['name'] in remaining])
+                ready_queue = [p for p in ready_queue if p['arrival'] > current_time or p['name'] not in remaining]
+                if not active_queue:
+                    current_time += 1
+                    continue
+                p = min(active_queue, key=lambda x: x['priority'])
+                timeline.append([p['name'], current_time, current_time + p['burst']])
+                current_time += p['burst']
+                completed[p['name']] = current_time
+                del remaining[p['name']]
+                active_queue.remove(p)
+        elif algo == "Priority Preemptive":
+            queue = ready_queue.copy()
+            while any(v > 0 for v in remaining.values()):
+                available = [p for p in queue if p['arrival'] <= current_time and remaining[p['name']] > 0]
+                if not available:
+                    current_time += 1
+                    continue
+                p = min(available, key=lambda x: x['priority'])
+                run_time = 1
+                timeline.append([p['name'], current_time, current_time + run_time])
+                current_time += run_time
+                remaining[p['name']] -= run_time
+                if remaining[p['name']] <= 0:
+                    completed[p['name']] = current_time
+                    queue.remove(p)
+        elif algo == "Multilevel Queue":
+            fg_queue = [p for p in ready_queue if p['priority'] <= 2]
+            bg_queue = [p for p in ready_queue if p['priority'] > 2]
+            while fg_queue or bg_queue:
+                if fg_queue:
+                    p = fg_queue.pop(0)
+                    if current_time < p['arrival']:
+                        current_time = p['arrival']
+                    run_time = min(remaining[p['name']], quantum or 2)
+                    timeline.append([p['name'], current_time, current_time + run_time])
+                    current_time += run_time
+                    remaining[p['name']] -= run_time
+                    if remaining[p['name']] <= 0:
+                        completed[p['name']] = current_time
+                    else:
+                        fg_queue.append(p)
+                elif bg_queue:
+                    p = bg_queue.pop(0)
+                    if current_time < p['arrival']:
+                        current_time = p['arrival']
+                    timeline.append([p['name'], current_time, current_time + p['burst']])
+                    current_time += p['burst']
+                    completed[p['name']] = current_time
+                    del remaining[p['name']]
+        elif algo == "Multilevel Feedback Queue":
+            q1 = ready_queue.copy()
+            q2 = []
+            q3 = []
+            queue_levels = {p['name']: 1 for p in processes}
+            while any(v > 0 for v in remaining.values()):
+                available_q1 = [p for p in q1 if p['arrival'] <= current_time and remaining[p['name']] > 0]
+                if available_q1:
+                    p = available_q1[0]
+                    run_time = min(quantum or 2, remaining[p['name']])
+                    timeline.append([p['name'], current_time, current_time + run_time])
+                    current_time += run_time
+                    remaining[p['name']] -= run_time
+                    if remaining[p['name']] <= 0:
+                        completed[p['name']] = current_time
+                        q1.remove(p)
+                    else:
+                        q1.remove(p)
+                        queue_levels[p['name']] = 2
+                        q2.append(p)
+                    continue
+                available_q2 = [p for p in q2 if p['arrival'] <= current_time and remaining[p['name']] > 0]
+                if available_q2:
+                    p = available_q2[0]
+                    run_time = min(quantum or 4, remaining[p['name']])
+                    timeline.append([p['name'], current_time, current_time + run_time])
+                    current_time += run_time
+                    remaining[p['name']] -= run_time
+                    if remaining[p['name']] <= 0:
+                        completed[p['name']] = current_time
+                        q2.remove(p)
+                    else:
+                        q2.remove(p)
+                        queue_levels[p['name']] = 3
+                        q3.append(p)
+                    continue
+                available_q3 = [p for p in q3 if p['arrival'] <= current_time and remaining[p['name']] > 0]
+                if available_q3:
+                    p = available_q3[0]
+                    run_time = remaining[p['name']]
+                    timeline.append([p['name'], current_time, current_time + run_time])
+                    current_time += run_time
+                    remaining[p['name']] = 0
+                    completed[p['name']] = current_time
+                    q3.remove(p)
+                    continue
+                current_time += 1
+
+        # Calculate metrics
+        metrics = []
+        total_tat = 0
+        total_wt = 0
+        for p in processes:
+            ct = completed.get(p['name'], 0)
+            tat = ct - p['arrival'] if ct > 0 else 0
+            wt = max(tat - p['burst'], 0)
+            total_tat += tat
+            total_wt += wt
+            metrics.append({
+                'name': p['name'],
+                'at': p['arrival'],
+                'bt': p['burst'],
+                'ct': ct,
+                'tat': tat,
+                'wt': wt
+            })
+
+        return {
+            'timeline': timeline,
+            'metrics': metrics,
+            'total_bt': total_burst,
+            'total_tat': total_tat,
+            'total_wt': total_wt
+        }
+    except ValueError as e:
+        return {'error': str(e)}, 400
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/compare')
+def compare():
+    return render_template('compare.html')
+
+@app.route('/', methods=['POST'])
+def run_simulation():
+    try:
+        algo = request.form.get('algo')
+        quantum = int(request.form.get('quantum', 0)) if "RR" in algo or "Multilevel" in algo else None
+        processes = []
+        i = 1
+        while f'name{i}' in request.form:
+            name = request.form.get(f'name{i}', f'P{i}')
+            arrival = int(request.form.get(f'arrival{i}', 0))
+            burst = int(request.form.get(f'burst{i}', 1))
+            priority = int(request.form.get(f'priority{i}', 1)) if f'priority{i}' in request.form else 1
+            processes.append({'name': name, 'arrival': arrival, 'burst': burst, 'priority': priority})
+            i += 1
+        result = compute_schedule(algo, processes, quantum)
+        if 'error' in result:
+            return jsonify(result), 400
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+
+def open_browser():
+    url = 'http://127.0.0.1:5000'
+    system = platform.system()
+    try:
+        if system == 'Linux':
+            webbrowser.get('xdg-open').open_new_tab(url)
+        else:
+            webbrowser.open_new_tab(url)
+    except Exception as e:
+        print(f"Could not open browser: {e}. Please open {url} manually.")
+
+if __name__ == '__main__':
+    open_browser()
+    app.run(host='0.0.0.0', port=5000)
+
+
+
+-------------------------------------
+____/templates/index.html____
+-------------------------------------
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scheduling Algorithm Visualizer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="title">
+            <h1>Scheduling Algorithm Visualizer</h1>
+        </header>
+
+        <main class="visualizer">
+            <section class="input-section">
+                <p class="nav-label">Select algorithm to visualize</p>
+                <nav class="nav">
+                    <ul class="nav-list">
+                        <li><a href="#" data-algo="FCFS Non-Preemptive">FCFS Non-Preemptive</a></li>
+                        <li><a href="#" data-algo="FCFS Preemptive">FCFS Preemptive</a></li>
+                        <li><a href="#" data-algo="SJF Non-Preemptive">SJF Non-Preemptive</a></li>
+                        <li><a href="#" data-algo="SRTF">SRTF</a></li>
+                        <li><a href="#" data-algo="RR Non-Preemptive">RR Non-Preemptive</a></li>
+                        <li><a href="#" data-algo="RR Preemptive">RR Preemptive</a></li>
+                        <li><a href="#" data-algo="Priority Non-Preemptive">Priority Non-Preemptive</a></li>
+                        <li><a href="#" data-algo="Priority Preemptive">Priority Preemptive</a></li>
+                        <li><a href="#" data-algo="Multilevel Queue">Multilevel MOST POPULAR!</a></li>
+                        <li><a href="#" data-algo="Multilevel Feedback Queue">Multilevel Feedback Queue</a></li>
+                    </ul>
+                </nav>
+                <div class="process-input hidden">
+                    <h2>Input Processes</h2>
+                    <form id="process-form">
+                        <table id="process-table">
+                            <thead>
+                                <tr>
+                                    <th>Process</th>
+                                    <th>Arrival Time</th>
+                                    <th>Burst Time</th>
+                                    <th class="priority-col">Priority</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="process-rows">
+                                <tr data-id="1">
+                                    <td><input type="text" name="name1" value="P1" aria-label="Process name 1"></td>
+                                    <td><input type="number" name="arrival1" value="0" min="0" aria-label="Arrival time 1"></td>
+                                    <td><input type="number" name="burst1" value="5" min="1" aria-label="Burst time 1"></td>
+                                    <td class="priority-col"><input type="number" name="priority1" value="1" min="1" aria-label="Priority 1"></td>
+                                    <td><button type="button" class="delete-btn" aria-label="Delete process 1">Delete</button></td>
+                                </tr>
+                                <tr data-id="2">
+                                    <td><input type="text" name="name2" value="P2" aria-label="Process name 2"></td>
+                                    <td><input type="number" name="arrival2" value="2" min="0" aria-label="Arrival time 2"></td>
+                                    <td><input type="number" name="burst2" value="3" min="1" aria-label="Burst time 2"></td>
+                                    <td class="priority-col"><input type="number" name="priority2" value="2" min="1" aria-label="Priority 2"></td>
+                                    <td><button type="button" class="delete-btn" aria-label="Delete process 2">Delete</button></td>
+                                </tr>
+                                <tr data-id="3">
+                                    <td><input type="text" name="name3" value="P3" aria-label="Process name 3"></td>
+                                    <td><input type="number" name="arrival3" value="4" min="0" aria-label="Arrival time 3"></td>
+                                    <td><input type="number" name="burst3" value="4" min="1" aria-label="Burst time 3"></td>
+                                    <td class="priority-col"><input type="number" name="priority3" value="3" min="1" aria-label="Priority 3"></td>
+                                    <td><button type="button" class="delete-btn" aria-label="Delete process 3">Delete</button></td>
+                                </tr>
+                                <tr data-id="4">
+                                    <td><input type="text" name="name4" value="P4" aria-label="Process name 4"></td>
+                                    <td><input type="number" name="arrival4" value="6" min="0" aria-label="Arrival time 4"></td>
+                                    <td><input type="number" name="burst4" value="2" min="1" aria-label="Burst time 4"></td>
+                                    <td class="priority-col"><input type="number" name="priority4" value="4" min="1" aria-label="Priority 4"></td>
+                                    <td><button type="button" class="delete-btn" aria-label="Delete process 4">Delete</button></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        <div class="form-buttons">
+                            <div id="quantum-section" class="hidden">
+                                <label for="quantum">Time Quantum (for RR/Multilevel):</label>
+                                <input type="number" id="quantum" name="quantum" value="2" min="1" aria-label="Time quantum">
+                            </div>
+                            <button type="button" id="add-process" aria-label="Add new process">Add Process</button>
+                            <button type="submit" aria-label="Run simulation">Run</button>
+                        </div>
+                        <input type="hidden" id="algo" name="algo" value="FCFS Non-Preemptive">
+                    </form>
+                </div>
+                <div id="compare-section" class="compare-section hidden">
+                    <label for="compare-algo">Compare with:</label>
+                    <select id="compare-algo" name="compare-algo">
+                        <option value="FCFS Non-Preemptive">FCFS Non-Preemptive</option>
+                        <option value="FCFS Preemptive">FCFS Preemptive</option>
+                        <option value="SJF Non-Preemptive">SJF Non-Preemptive</option>
+                        <option value="SRTF">SRTF</option>
+                        <option value="RR Non-Preemptive">RR Non-Preemptive</option>
+                        <option value="RR Preemptive">RR Preemptive</option>
+                        <option value="Priority Non-Preemptive">Priority Non-Preemptive</option>
+                        <option value="Priority Preemptive">Priority Preemptive</option>
+                        <option value="Multilevel Queue">Multilevel Queue</option>
+                        <option value="Multilevel Feedback Queue">Multilevel Feedback Queue</option>
+                    </select>
+                    <button id="compare-btn" aria-label="Compare algorithms">Compare</button>
+                </div>
+                <div id="error-message" class="error hidden"></div>
+            </section>
+            <section class="output-section hidden">
+                <h2>Gantt Chart</h2>
+                <div id="gantt-chart"></div>
+                <div id="explanation">
+                    <h3>Understanding the Gantt Chart</h3>
+                    <div class="explanation-grid">
+                        <div id="algo-details"></div>
+                        <div id="default-details"></div>
+                    </div>
+                </div>
+                <div class="calculations">
+                    <div class="calc-times">
+                        <h2>Calculated Times</h2>
+                        <div id="calc-times-text"></div>
+                    </div>
+                    <div class="formulas">
+                        <h2>Formulas</h2>
+                        <div id="formulas-text"></div>
+                    </div>
+                </div>
+                <div class="calculated-table">
+                    <h2>Calculated Table</h2>
+                    <div id="metrics-table"></div>
+                </div>
+                <div class="graphs">
+                    <h2>Graphical Visualization</h2>
+                    <div class="graph-container">
+                        <div class="graph-item line-graph">
+                            <canvas id="line-chart"></canvas>
+                            <h4>Figure 1: Line{-webkit-optimize-contrast Chart of Process Times</h4>
+                        </div>
+                        <div class="graph-item bar-graph">
+                            <canvas id="bar-chart"></canvas>
+                            <h4>Figure 2: Bar Chart of Process Times</h4>
+                        </div>
+                        <div class="graph-item pie-graph-bt">
+                            <canvas id="pie-chart-bt"></canvas>
+                            <h4>Figure 3: Pie Chart of Burst Time</h4>
+                        </div>
+                        <div class="graph-item pie-graph-ct">
+                            <canvas id="pie-chart-ct"></canvas>
+                            <h4>Figure 4: Pie Chart of Completion Time</h4>
+                        </div>
+                        <div class="graph-item pie-graph-tat">
+                            <canvas id="pie-chart-tat"></canvas>
+                            <h4>Figure 5: Pie Chart of Turnaround Time</h4>
+                        </div>
+                        <div class="graph-item pie-graph-wt">
+                            <canvas id="pie-chart-wt"></canvas>
+                            <h4>Figure 6: Pie Chart of Waiting Time</h4>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <p>© 2025 Scheduling Algorithm Visualizer Team | Daffodil International University</p>
+        </footer>
+    </div>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
+
+-------------------------------------
+____/static/style.css____
+-------------------------------------
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: Arial, sans-serif;
+}
+
+.container {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    min-height: 100vh;
+    gap: 10px;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.title {
+    grid-row: 1;
+    background-color: #2c3e50;
+    color: white;
+    text-align: center;
+    padding: 20px;
+}
+
+.visualizer {
+    grid-row: 2;
+    display: grid;
+    grid-template-columns: 2fr 5fr;
+    gap: 20px;
+    padding: 20px;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.input-section {
+    background-color: #ecf0f1;
+    padding: 20px;
+    border-radius: 5px;
+}
+
+.input-section .nav {
+    background-color: #34495e;
+    padding: 10px;
+    margin-bottom: 15px;
+    border-radius: 8px;
+}
+
+.input-section .nav-label {
+    font-size: 24px;
+    font-weight: bold;
+    color: #2c3e50;
+    margin-bottom: 10px;
+    text-align: center;
+}
+
+.nav-list {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    list-style: none;
+    text-align: center;
+}
+
+.nav-list li {
+    display: block;
+}
+
+.nav a {
+    color: white;
+    text-decoration: none;
+    padding: 10px;
+    display: block;
+    border-radius: 6px;
+}
+
+.nav a:hover, .nav a.active {
+    background-color: #1abc9c;
+}
+
+.input-section h2 {
+    margin-bottom: 15px;
+    text-align: center;
+}
+
+.process-input.hidden {
+    display: none;
+}
+
+.input-section table {
+    width: 100%;
+    margin-bottom: 15px;
+}
+
+.input-section th, .input-section td {
+    padding: 8px;
+}
+
+.input-section input {
+    width: 100%;
+    padding: 5px;
+    height: 40px;
+    border-radius: 8px;
+    border: 1px solid #ccc;
+}
+
+.input-section input.error {
+    border: 2px solid red;
+}
+
+#quantum-section input {
+    width: 60px;
+}
+
+.input-section button {
+    background-color: #1abc9c;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    cursor: pointer;
+    border-radius: 8px;
+}
+
+.form-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    align-items: center;
+}
+
+.delete-btn {
+    background-color: #e74c3c;
+    padding: 5px 10px;
+    border-radius: 8px;
+}
+
+.compare-section {
+    margin-top: 15px;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: center;
+}
+
+.compare-section label {
+    font-weight: bold;
+    color: #2c3e50;
+}
+
+.compare-section select {
+    padding: 5px;
+    border-radius: 5px;
+    border: 1px solid #ccc;
+}
+
+.compare-section button {
+    background-color: #1abc9c;
+    color: white;
+    border: none;
+    padding: 8px 15px;
+    cursor: pointer;
+    border-radius: 5px;
+}
+
+.compare-section button:hover {
+    background-color: #16a085;
+}
+
+.error {
+    color: red;
+    margin-top: 10px;
+    text-align: center;
+}
+
+.output-section {
+    padding: 20px;
+    border-radius: 5px;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.output-section.hidden {
+    display: none;
+}
+
+.output-section:not(.hidden) {
+    background-color: #d5e8d4;
+}
+
+.output-section h2 {
+    margin-bottom: 15px;
+    text-align: center;
+}
+
+#gantt-chart {
+    display: flex;
+    flex-wrap: wrap;
+    margin-top: 15px;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.gantt-block {
+    height: 100px;
+    background-color: #3498db;
+    color: white;
+    text-align: center;
+    margin: 5px;
+    border: 1px solid #2980b9;
+    font-size: 16px;
+    opacity: 0;
+    animation: fadeIn 0.5s ease-in forwards;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    line-height: 1.5;
+    min-width: 60px;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+#explanation {
+    background-color: #f0f9e6;
+    padding: 15px;
+    margin-top: 20px;
+    text-align: center;
+    border-radius: 5px;
+}
+
+#explanation h3 {
+    margin-bottom: 15px;
+}
+
+.explanation-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    text-align: left;
+}
+
+#algo-details {
+    background-color: #f0e6ff;
+    padding: 10px;
+    border-radius: 5px;
+}
+
+#default-details {
+    background-color: #f0e6ff;
+    padding: 10px;
+    border-radius: 5px;
+}
+
+#explanation .subtext {
+    font-size: 14px;
+    margin-bottom: 10px;
+    padding: 5px;
+    background-color: #cceeff;
+    border-radius: 3px;
+}
+
+.calculations {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-top: 20px;
+    text-align: left;
+}
+
+.calc-times {
+    background-color: #e8f1f5;
+    padding: 15px;
+    border-radius: 5px;
+}
+
+.formulas {
+    background-color: #e8f1f5;
+    padding: 15px;
+    border-radius: 5px;
+}
+
+.calculated-table {
+    background-color: #cce5ff;
+    padding: 15px;
+    margin-top: 20px;
+    border-radius: 5px;
+    text-align: left;
+}
+
+#calc-times-text, #formulas-text, #metrics-table {
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+#calc-times-text .subtext, #formulas-text .subtext {
+    margin-bottom: 10px;
+    padding: 5px;
+}
+
+#calc-times-text .bg-color1 { background-color: #ffcccc; }
+#calc-times-text .bg-color2 { background-color: #cce5ff; }
+#calc-times-text .bg-color3 { background-color: #fff3cd; }
+#calc-times-text .bg-color4 { background-color: #cceeff; }
+#calc-times-text .bg-color5 { background-color: #e6ccff; }
+
+#formulas-text .bg-color1 { background-color: #ffcccc; }
+#formulas-text .bg-color2 { background-color: #cce5ff; }
+#formulas-text .bg-color3 { background-color: #fff3cd; }
+
+#metrics-table table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+#metrics-table th, #metrics-table td {
+    padding: 5px;
+    border: 1px solid #ccc;
+    text-align: center;
+}
+
+#metrics-table th {
+    background-color: #2c3e50;
+    color: white;
+}
+
+.graphs {
+    background-color: #f5e8e8;
+    padding: 15px;
+    margin-top: 20px;
+    border-radius: 5px;
+    text-align: center;
+}
+
+.graphs h2 {
+    text-align: center;
+    margin-bottom: 15px;
+}
+
+.graph-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 20px;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.graph-item {
+    text-align: center;
+    padding: 10px;
+    border-radius: 5px;
+}
+
+.graph-item h4 {
+    margin-top: 10px;
+    color: #2c3e50;
+}
+
+.graph-item canvas {
+    max-width: 100%;
+    max-height: 400px;
+    width: 100%;
+    height: auto;
+    image-rendering: -webkit-optimize-contrast;
+}
+
+.line-graph, .bar-graph {
+    background-color: #e6f3ff;
+}
+
+.line-graph canvas, .bar-graph canvas {
+    max-height: 300px;
+    width: 100%;
+}
+
+.bar-graph {
+    overflow-x: visible;
+}
+
+.pie-graph-bt { background-color: #f0f9e6; }
+.pie-graph-ct { background-color: #cceeff; }
+.pie-graph-tat { background-color: #f0e6ff; }
+.pie-graph-wt { background-color: #bbeed0; }
+
+@media (max-width: 800px) {
+    .visualizer {
+        grid-template-columns: 1fr;
+    }
+    .output-section {
+        display: grid;
+        grid-template-columns: 1fr;
+    }
+    .explanation-grid {
+        grid-template-columns: 1fr;
+    }
+    .calculations {
+        grid-template-columns: 1fr;
+    }
+    .graph-container {
+        grid-template-columns: 1fr;
+    }
+    .line-graph, .bar-graph {
+        padding: 20px;
+    }
+    .line-graph canvas, .bar-graph canvas {
+        max-height: 200px;
+        width: 100%;
+        margin: 0 auto;
+    }
+    .gantt-block {
+        font-size: 14px;
+        min-width: 50px;
+    }
+}
+
+@media (min-width: 800px) {
+    .graph-container {
+        grid-template-columns: repeat(2, 1fr);
+    }
+    .graph-container .pie-graph-bt,
+    .graph-container .pie-graph-ct,
+    .graph-container .pie-graph-tat,
+    .graph-container .pie-graph-wt {
+        grid-column: span 1;
+    }
+}
+
+@media (min-width: 1200px) {
+    .graph-container {
+        grid-template-columns: repeat(4, 1fr);
+    }
+    .graph-container .line-graph,
+    .graph-container .bar-graph {
+        grid-column: span 2;
+    }
+}
+
+.footer {
+    grid-row: 3;
+    background-color: #2c3e50;
+    color: white;
+    text-align: center;
+    padding: 10px;
+}
+
+.hidden {
+    display: none;
+}
+
+-------------------------------------
+____/static/script.js____
+-------------------------------------
+document.addEventListener('DOMContentLoaded', () => {
+    const processInput = document.querySelector('.process-input');
+    const form = document.getElementById('process-form');
+    const navLinks = document.querySelectorAll('.nav a');
+    const algoInput = document.getElementById('algo');
+    const outputSection = document.querySelector('.output-section');
+    const ganttChart = document.getElementById('gantt-chart');
+    const algoDetails = document.getElementById('algo-details');
+    const defaultDetails = document.getElementById('default-details');
+    const calcTimesText = document.getElementById('calc-times-text');
+    const formulasText = document.getElementById('formulas-text');
+    const metricsTable = document.getElementById('metrics-table');
+    const processRows = document.getElementById('process-rows');
+    const addProcessBtn = document.getElementById('add-process');
+    const quantumSection = document.getElementById('quantum-section');
+    const errorMessage = document.getElementById('error-message');
+    const compareSection = document.getElementById('compare-section');
+    const compareAlgoSelect = document.getElementById('compare-algo');
+    const compareBtn = document.getElementById('compare-btn');
+
+    let processCount = 4;
+    let charts = {}; // Store Chart.js instances
+    let currentFormData = null; // Store form data for comparison
+
+    function validateInput(input) {
+        const value = parseInt(input.value);
+        if (input.name.includes('burst') && (isNaN(value) || value <= 0)) {
+            input.classList.add('error');
+            input.setCustomValidity('Burst time must be greater than 0');
+            return false;
+        } else if (input.name.includes('arrival') && (isNaN(value) || value < 0)) {
+            input.classList.add('error');
+            input.setCustomValidity('Arrival time cannot be negative');
+            return false;
+        } else if (input.name.includes('priority') && (isNaN(value) || value < 1)) {
+            input.classList.add('error');
+            input.setCustomValidity('Priority must be at least 1');
+            return false;
+        } else {
+            input.classList.remove('error');
+            input.setCustomValidity('');
+            return true;
+        }
+    }
+
+    function validateForm() {
+        let valid = true;
+        document.querySelectorAll('#process-rows input[type="number"]').forEach(input => {
+            if (!validateInput(input)) {
+                valid = false;
+            }
+        });
+        return valid;
+    }
+
+    function showError(message) {
+        errorMessage.textContent = message;
+        errorMessage.classList.remove('hidden');
+        setTimeout(() => errorMessage.classList.add('hidden'), 5000);
+    }
+
+    function updateInputs(algo) {
+        navLinks.forEach(l => l.classList.remove('active'));
+        const activeLink = Array.from(navLinks).find(l => l.dataset.algo === algo);
+        if (activeLink) activeLink.classList.add('active');
+
+        algoInput.value = algo;
+        const isRR = algo.includes("RR") || algo.includes("Multilevel");
+        const needsPriority = algo.includes("Priority") || algo.includes("Multilevel");
+
+        quantumSection.classList.toggle('hidden', !isRR);
+        document.querySelectorAll('.priority-col').forEach(col => {
+            col.classList.toggle('hidden', !needsPriority);
+        });
+
+        // Show the process input section when a nav link is clicked
+        processInput.classList.remove('hidden');
+    }
+
+    function addProcessRow() {
+        processCount++;
+        const row = document.createElement('tr');
+        row.dataset.id = processCount;
+        row.innerHTML = `
+            <td><input type="text" name="name${processCount}" value="P${processCount}" aria-label="Process name ${processCount}"></td>
+            <td><input type="number" name="arrival${processCount}" value="0" min="0" aria-label="Arrival time ${processCount}"></td>
+            <td><input type="number" name="burst${processCount}" value="1" min="1" aria-label="Burst time ${processCount}"></td>
+            <td class="priority-col"><input type="number" name="priority${processCount}" value="1" min="1" aria-label="Priority ${processCount}"></td>
+            <td><button type="button" class="delete-btn" aria-label="Delete process ${processCount}">Delete</button></td>
+        `;
+        processRows.appendChild(row);
+        row.querySelector('.delete-btn').addEventListener('click', () => deleteProcessRow(row));
+        row.querySelectorAll('input[type="number"]').forEach(input => {
+            input.addEventListener('input', () => validateInput(input));
+        });
+        updateInputs(algoInput.value);
+    }
+
+    function deleteProcessRow(row) {
+        if (processRows.children.length > 1) {
+            processRows.removeChild(row);
+            renumberProcesses();
+        }
+    }
+
+    function renumberProcesses() {
+        Array.from(processRows.children).forEach((row, index) => {
+            const id = index + 1;
+            row.dataset.id = id;
+            row.querySelector('input[name^="name"]').name = `name${id}`;
+            row.querySelector('input[name^="arrival"]').name = `arrival${id}`;
+            row.querySelector('input[name^="burst"]').name = `burst${id}`;
+            row.querySelector('input[name^="priority"]').name = `priority${id}`;
+            row.querySelector('input[name^="name"]').setAttribute('aria-label', `Process name ${id}`);
+            row.querySelector('input[name^="arrival"]').setAttribute('aria-label', `Arrival time ${id}`);
+            row.querySelector('input[name^="burst"]').setAttribute('aria-label', `Burst time ${id}`);
+            row.querySelector('input[name^="priority"]').setAttribute('aria-label', `Priority ${id}`);
+            row.querySelector('.delete-btn').setAttribute('aria-label', `Delete process ${id}`);
+        });
+        processCount = processRows.children.length;
+    }
+
+    function destroyCharts() {
+        Object.values(charts).forEach(chart => {
+            if (chart) chart.destroy();
+        });
+        charts = {};
+    }
+
+    navLinks.forEach(link => {
+        link.addEventListener('click', (e) => {
+            e.preventDefault();
+            updateInputs(link.dataset.algo);
+        });
+    });
+
+    addProcessBtn.addEventListener('click', addProcessRow);
+
+    document.querySelectorAll('.delete-btn').forEach(btn => {
+        btn.addEventListener('click', () => deleteProcessRow(btn.closest('tr')));
+    });
+
+    document.querySelectorAll('input[type="number"]').forEach(input => {
+        input.addEventListener('input', () => validateInput(input));
+    });
+
+    compareBtn.addEventListener('click', () => {
+        const algo1 = algoInput.value;
+        const algo2 = compareAlgoSelect.value;
+        if (algo1 === algo2) {
+            showError('Please select a different algorithm to compare.');
+            return;
+        }
+        const formDataSerialized = new URLSearchParams(currentFormData).toString();
+        window.location.href = `/compare?algo1=${encodeURIComponent(algo1)}&algo2=${encodeURIComponent(algo2)}&${formDataSerialized}`;
+    });
+
+    form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        if (!validateForm()) {
+            showError('Please correct invalid inputs before running the simulation.');
+            return;
+        }
+
+        const formData = new FormData(form);
+        currentFormData = formData; // Store form data for comparison
+        const algo = algoInput.value;
+
+        fetch('/', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(err => { throw new Error(err.error); });
+            }
+            return response.json();
+        })
+        .then(data => {
+            outputSection.classList.remove('hidden');
+            compareSection.classList.remove('hidden'); // Show comparison section
+            ganttChart.innerHTML = '';
+            algoDetails.innerHTML = '';
+            defaultDetails.innerHTML = '';
+            calcTimesText.innerHTML = '';
+            formulasText.innerHTML = '';
+            metricsTable.innerHTML = '';
+
+            // Destroy existing charts
+            destroyCharts();
+
+            // Gantt Chart
+            data.timeline.forEach(([name, start, end], index) => {
+                if (index < 100) {  // Limit to 100 blocks for performance
+                    const block = document.createElement('div');
+                    block.className = 'gantt-block';
+                    block.style.width = `${Math.max((end - start) * 80, 20)}px`;
+                    block.innerHTML = `${name}<br>(${start}-${end})`;
+                    ganttChart.appendChild(block);
+                }
+            });
+
+            const blocks = document.querySelectorAll('.gantt-block');
+            blocks.forEach((block, index) => {
+                block.style.animationDelay = `${index * 0.5}s`;
+            });
+
+            // Default Explanation Text
+            defaultDetails.innerHTML = `
+                <div class="subtext">Each block represents a process running on the CPU.</div>
+                <div class="subtext">The top text (e.g., "P1") is the process name.</div>
+                <div class="subtext">The bottom text (e.g., "(2-6)") shows the time range: start time to end time.</div>
+                <div class="subtext">Blocks appear one by one to show the execution order.</div>
+                <div class="subtext">Wider blocks mean longer execution times.</div>
+            `;
+
+            // Algorithm-Specific Details
+            if (algo === "FCFS Non-Preemptive") {
+                algoDetails.innerHTML = `
+                    <div class="subtext"><strong>FCFS Non-Preemptive:</strong></div>
+                    <div class="subtext">Processes are executed in the exact order of arrival, with no interruption once a process starts running.</div>
+                    <div class="subtext">Each process holds the CPU until it finishes, resulting in large continuous blocks representing full burst times.</div>
+                    <div class="subtext">Simple and easy to implement but can lead to the "convoy effect," where short processes wait behind long ones, increasing average waiting time.</div>
+                `;
+            } else if (algo === "FCFS Preemptive") {
+                algoDetails.innerHTML = `
+                    <div class="subtext"><strong>FCFS Preemptive:</strong></div>
+                    <div class="subtext">Processes are selected based on arrival time but can be interrupted at regular intervals using time quantum.</div>
+                    <div class="subtext">CPU allocation is split into smaller time slices, giving a fairer distribution among processes and reducing long wait times.</div>
+                    <div class="subtext">It combines the simplicity of FCFS with the responsiveness of preemption, improving overall system performance for short jobs.</div>
+                `;
+            } else if (algo === "SJF Non-Preemptive") {
+                algoDetails.innerHTML = `
+                    <div class="subtext"><strong>SJF Non-Preemptive:</strong></div>
+                    <div class="subtext">Processes with the shortest burst time are selected first and run to completion without interruption.</div>
+                    <div class="subtext">CPU is assigned based on minimal execution time, leading to reduced average waiting and turnaround times.</div>
+                    <div class="subtext">Highly efficient in ideal scenarios, but requires accurate burst time prediction and may cause starvation for long processes.</div>
+                `;
+            } else if (algo === "SRTF") {
+                algoDetails.innerHTML = `
+                    <div class="subtext"><strong>Shortest Remaining Time First (SRTF):</strong></div>
+                    <div class="subtext">A preemptive version of SJF where the process with the least remaining burst time is always selected to run.</div>
+                    <div class="subtext">If a new process arrives with a shorter remaining time, it interrupts the currently running process.</div>
+                    <div class="subtext">Offers the lowest average waiting time, but frequent context switching and starvation of longer jobs are possible.</div>
+                `;
+            } else if (algo === "RR Non-Preemptive") {
+                algoDetails.innerHTML = `
+                    <div class="subtext"><strong>RR Non-Preemptive:</strong></div>
+                    <div class="subtext">Each process gets CPU for a time quantum and runs uninterrupted during its slot.</div>
+                    <div class="subtext">If the process doesn’t complete in the time quantum, it re-enters the queue to wait for its next turn.</div>
+                    <div class="subtext">Combines fairness with reduced overhead, but longer jobs may still wait behind multiple short ones.</div>
+                `;
+            } else if (algo === "RR Preemptive") {
+                algoDetails.innerHTML = `
+                    <div class="subtext"><strong>RR Preemptive:</strong></div>
+                    <div class="subtext">Time-sharing strategy where each process gets a fixed quantum and is forcibly switched if it exceeds it.</div>
+                    <div class="subtext">Ensures that all processes receive regular CPU access, improving response time for interactive tasks.</div>
+                    <div class="subtext">Efficient for time-sharing systems but may result in high context-switching overhead with too small a quantum.</div>
+                `;
+            } else if (algo === "Priority Non-Preemptive") {
+                algoDetails.innerHTML = `
+                    <div class="subtext"><strong>Priority Non-Preemptive:</strong></div>
+                    <div class="subtext">CPU is assigned to the process with the highest priority (lowest number), running it to completion before checking others.</div>
+                    <div class="subtext">Arrival order and burst time are ignored in favor of static priority levels.</div>
+                    <div class="subtext">Efficient for handling critical tasks first but risks starvation for low-priority processes if high-priority ones keep arriving.</div>
+                `;
+            } else if (algo === "Priority Preemptive") {
+                algoDetails.innerHTML = `
+                    <div class="subtext"><strong>Priority Preemptive:</strong></div>
+                    <div class="subtext">Similar to Priority Non-Preemptive but allows a running process to be interrupted if a higher priority one arrives.</div>
+                    <div class="subtext">The scheduler frequently evaluates priority levels, enabling dynamic control of CPU access.</div>
+                    <div class="subtext">Maximizes responsiveness to urgent tasks but can lead to starvation of lower-priority processes and more context switches.</div>
+                `;
+            } else if (algo === "Multilevel Queue") {
+                algoDetails.innerHTML = `
+                    <div class="subtext"><strong>Multilevel Queue:</strong></div>
+                    <div class="subtext">Processes are classified into separate queues based on priority: Foreground (Priority 1–2) uses RR (quantum=2), Background (Priority 3+) uses FCFS.</div>
+                    <div class="subtext">Foreground queue is always served first, and background only runs when foreground is empty.</div>
+                    <div class="subtext">Enforces strict process type separation, ideal for distinguishing between interactive and batch jobs, but background processes can suffer from starvation.</div>
+                `;
+            } else if (algo === "Multilevel Feedback Queue") {
+                algoDetails.innerHTML = `
+                    <div class="subtext"><strong>Multilevel Feedback Queue:</strong></div>
+                    <div class="subtext">Dynamic system with three levels: Q1 (RR, quantum=2), Q2 (RR, quantum=4), Q3 (FCFS). New processes start in Q1.</div>
+                    <div class="subtext">If a process exceeds its quantum in a queue, it is demoted to a lower-priority queue (e.g., from Q1 to Q2).</div>
+                    <div class="subtext">Favors short and interactive processes, automatically adjusts to process behavior, and avoids starvation through aging or queue migration policies.</div>
+                `;
+            }
+
+            // Calculated Times
+            calcTimesText.innerHTML = `
+                <div class="subtext bg-color1"><strong>Total Burst Time:</strong> ${data.total_bt}</div>
+                <div class="subtext bg-color2"><strong>Total Turnaround Time:</strong> ${data.total_tat}</div>
+                <div class="subtext bg-color3"><strong>Total Waiting Time:</strong> ${data.total_wt}</div>
+                <div class="subtext bg-color4"><strong>Average Turnaround Time:</strong> ${(data.total_tat / data.metrics.length).toFixed(2)}</div>
+                <div class="subtext bg-color5"><strong>Average Waiting Time:</strong> ${(data.total_wt / data.metrics.length).toFixed(2)}</div>
+            `;
+
+            // Formulas
+            formulasText.innerHTML = `
+                <div class="subtext bg-color1"><strong>Completion Time (CT):</strong> Time when process finishes</div>
+                <div class="subtext bg-color2"><strong>Turnaround Time (TAT):</strong> CT - Arrival Time (AT)</div>
+                <div class="subtext bg-color3"><strong>Waiting Time (WT):</strong> TAT - Burst Time (BT)</div>
+            `;
+
+            // Calculated Table
+            let tableHTML = '<table><tr><th>Process</th><th>AT</th><th>BT</th><th>CT</th><th>TAT</th><th>WT</th></tr>';
+            data.metrics.forEach(m => {
+                tableHTML += `<tr><td>${m.name}</td><td>${m.at}</td><td>${m.bt}</td><td>${m.ct}</td><td>${m.tat}</td><td>${m.wt}</td></tr>`;
+            });
+            tableHTML += '</table>';
+            metricsTable.innerHTML = tableHTML;
+
+            // Graphical Visualization
+            const labels = data.metrics.map(m => m.name);
+            const btData = data.metrics.map(m => m.bt);
+            const ctData = data.metrics.map(m => m.ct);
+            const tatData = data.metrics.map(m => m.tat);
+            const wtData = data.metrics.map(m => m.wt);
+
+            const isMobile = window.innerWidth <= 800;
+            const chartOptions = {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'top',
+                        labels: {
+                            font: {
+                                size: isMobile ? 10 : 12
+                            }
+                        }
+                    }
+                },
+                layout: {
+                    padding: {
+                        left: isMobile ? 20 : 20,
+                        right: 20,
+                        top: 10,
+                        bottom: 10
+                    }
+                },
+                scales: {
+                    x: {
+                        ticks: {
+                            font: {
+                                size: isMobile ? 10 : 12
+                            },
+                            maxRotation: isMobile ? 45 : 0,
+                            minRotation: isMobile ? 45 : 0
+                        }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            font: {
+                                size: isMobile ? 10 : 12
+                            }
+                        }
+                    }
+                }
+            };
+
+            const barChartOptions = {
+                ...chartOptions,
+                layout: {
+                    padding: {
+                        left: isMobile ? 40 : 20,
+                        right: 20,
+                        top: 10,
+                        bottom: 10
+                    }
+                }
+            };
+
+            // Line Chart
+            charts['line-chart'] = new Chart(document.getElementById('line-chart'), {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        { label: 'Burst Time', data: btData, borderColor: '#ff6384', fill: false },
+                        { label: 'Completion Time', data: ctData, borderColor: '#36a2eb', fill: false },
+                        { label: 'Turnaround Time', data: tatData, borderColor: '#ffcd56', fill: false },
+                        { label: 'Waiting Time', data: wtData, borderColor: '#4bc0c0', fill: false }
+                    ]
+                },
+                options: chartOptions
+            });
+
+            // Bar Chart
+            charts['bar-chart'] = new Chart(document.getElementById('bar-chart'), {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [
+                        { label: 'Burst Time', data: btData, backgroundColor: '#ff6384' },
+                        { label: 'Completion Time', data: ctData, backgroundColor: '#36a2eb' },
+                        { label: 'Turnaround Time', data: tatData, backgroundColor: '#ffcd56' },
+                        { label: 'Waiting Time', data: wtData, backgroundColor: '#4bc0c0' }
+                    ]
+                },
+                options: barChartOptions
+            });
+
+            // Pie Charts
+            charts['pie-chart-bt'] = new Chart(document.getElementById('pie-chart-bt'), {
+                type: 'pie',
+                data: {
+                    labels: labels,
+                    datasets: [{ data: btData, backgroundColor: ['#ff6384', '#36a2eb', '#ffcd56', '#4bc0c0'] }]
+                }
+            });
+
+            charts['pie-chart-ct'] = new Chart(document.getElementById('pie-chart-ct'), {
+                type: 'pie',
+                data: {
+                    labels: labels,
+                    datasets: [{ data: ctData, backgroundColor: ['#ff6384', '#36a2eb', '#ffcd56', '#4bc0c0'] }]
+                }
+            });
+
+            charts['pie-chart-tat'] = new Chart(document.getElementById('pie-chart-tat'), {
+                type: 'pie',
+                data: {
+                    labels: labels,
+                    datasets: [{ data: tatData, backgroundColor: ['#ff6384', '#36a2eb', '#ffcd56', '#4bc0c0'] }]
+                }
+            });
+
+            charts['pie-chart-wt'] = new Chart(document.getElementById('pie-chart-wt'), {
+                type: 'pie',
+                data: {
+                    labels: labels,
+                    datasets: [{ data: wtData, backgroundColor: ['#ff6384', '#36a2eb', '#ffcd56', '#4bc0c0'] }]
+                }
+            });
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showError(error.message || 'An error occurred while running the simulation.');
+        });
+    });
+});
+
+-------------------------------------
+____/templates/compare.html____
+-------------------------------------
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Compare Scheduling Algorithms</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='compare.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="title">
+            <h1>Compare Scheduling Algorithms</h1>
+        </header>
+
+        <main class="comparison-visualizer">
+            <section class="comparison-section">
+                <div class="gantt-comparison">
+                    <div class="gantt-item">
+                        <h2 id="algo1-title">Algorithm 1 Gantt Chart</h2>
+                        <div id="gantt-chart-1"></div>
+                    </div>
+                    <div class="gantt-item">
+                        <h2 id="algo2-title">Algorithm 2 Gantt Chart</h2>
+                        <div id="gantt-chart-2"></div>
+                    </div>
+                </div>
+
+                <div class="comparison-details">
+                    <h2>Comparison Details Table</h2>
+                    <div id="comparison-table"></div>
+                </div>
+
+                <div class="key-differences">
+                    <h2>Key Differences Between Algorithms</h2>
+                    <div id="key-differences-table"></div>
+                </div>
+
+                <div class="calculated-time-comparison">
+                    <h2>Calculated Time Comparison</h2>
+                    <div id="calc-time-comparison"></div>
+                </div>
+
+                <div class="visual-comparison">
+                    <h2>Visual Comparison</h2>
+                    <p>The following bar charts compare the average Turnaround Time (TAT) and Waiting Time (WT) between the two algorithms. TAT measures the total time a process takes from arrival to completion, while WT indicates the time a process spends waiting in the queue. Lower values are generally better for both metrics.</p>
+                    <div class="graph-container">
+                        <div class="graph-item bar-graph">
+                            <canvas id="tat-comparison-chart"></canvas>
+                            <h4>Average Turnaround Time Comparison</h4>
+                        </div>
+                        <div class="graph-item bar-graph">
+                            <canvas id="wt-comparison-chart"></canvas>
+                            <h4>Average Waiting Time Comparison</h4>
+                        </div>
+                    </div>
+                    <p>The line graphs below illustrate the trends of average Turnaround Time (TAT) and Waiting Time (WT) across the two algorithms, providing a visual comparison of their performance metrics.</p>
+                    <div class="graph-container">
+                        <div class="graph-item line-graph">
+                            <canvas id="tat-line-chart"></canvas>
+                            <h4>TAT Trend Comparison</h4>
+                        </div>
+                        <div class="graph-item line-graph">
+                            <canvas id="wt-line-chart"></canvas>
+                            <h4>WT Trend Comparison</h4>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="betterment-comparison">
+                    <h2>Betterment Comparison</h2>
+                    <p>The pie charts below illustrate the proportional contribution of each algorithm to the average Turnaround Time (TAT) and Waiting Time (WT). A smaller proportion indicates better performance in that metric.</p>
+                    <div class="graph-container">
+                        <div class="graph-item pie-graph">
+                            <canvas id="tat-pie-chart"></canvas>
+                            <h4>TAT Proportion</h4>
+                        </div>
+                        <div class="graph-item pie-graph">
+                            <canvas id="wt-pie-chart"></canvas>
+                            <h4>WT Proportion</h4>
+                        </div>
+                    </div>
+                    <div id="betterment-text"></div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <p>© 2025 Scheduling Algorithm Visualizer Team | Daffodil International University</p>
+        </footer>
+    </div>
+    <script src="{{ url_for('static', filename='compare.js') }}"></script>
+</body>
+</html>
+
+-------------------------------------
+____/static/compare.css____
+-------------------------------------
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: Arial, sans-serif;
+}
+
+.container {
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    min-height: 100vh;
+    gap: 10px;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.title {
+    grid-row: 1;
+    background-color: #2c3e50;
+    color: white;
+    text-align: center;
+    padding: 20px;
+}
+
+.comparison-visualizer {
+    grid-row: 2;
+    padding: 20px;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.comparison-section {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.gantt-comparison {
+    grid-column: span 2;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.gantt-item {
+    background-color: #d5e8d4;
+    padding: 15px;
+    border-radius: 5px;
+}
+
+.gantt-item h2 {
+    text-align: center;
+    margin-bottom: 15px;
+    color: #2c3e50;
+}
+
+#gantt-chart-1, #gantt-chart-2 {
+    display: flex;
+    flex-wrap: wrap;
+    margin-top: 15px;
+    max-width: 100%;
+    overflow-x: auto;
+}
+
+.gantt-block {
+    height: 100px;
+    background-color: #3498db;
+    color: white;
+    text-align: center;
+    margin: 5px;
+    border: 1px solid #2980b9;
+    font-size: 16px;
+    opacity: 0;
+    animation: fadeIn 0.5s ease-in forwards;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    line-height: 1.5;
+    min-width: 60px;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.comparison-details, .key-differences, .calculated-time-comparison, .visual-comparison, .betterment-comparison {
+    grid-column: span 2;
+    padding: 15px;
+    border-radius: 5px;
+    margin-top: 20px;
+}
+
+.comparison-details {
+    background-color: #cce5ff;
+}
+
+.key-differences {
+    background-color: #f0f9e6;
+}
+
+.comparison-details h2, .key-differences h2, .calculated-time-comparison h2, .visual-comparison h2, .betterment-comparison h2 {
+    text-align: center;
+    margin-bottom: 15px;
+    color: #2c3e50;
+}
+
+#comparison-table, #key-differences-table {
+    font-size: 14px;
+    line-height: 1.6;
+}
+
+#comparison-table table, #key-differences-table table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+#comparison-table th, #comparison-table td, #key-differences-table th, #key-differences-table td {
+    padding: 5px;
+    border: 1px solid #ccc;
+    text-align: center;
+}
+
+#comparison-table th, #key-differences-table th {
+    background-color: #2c3e50;
+    color: white;
+}
+
+.calculated-time-comparison {
+    background-color: #e8f1f5;
+    gap: 20px;
+}
+
+.calc-time-item {
+    background-color: #d5e8d4;
+    border-radius: 5px;
+    padding: 10px;
+}
+
+.calc-time-item h3 {
+    text-align: center;
+    margin-bottom: 10px;
+    color: #2c3e50;
+}
+
+#calc-time-comparison {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    font-size: 14px;
+    line-height: 1.6;
+    gap: 10px;
+}
+
+#calc-time-comparison .subtext {
+    margin-bottom: 10px;
+    padding: 5px;
+}
+
+#calc-time-comparison .bg-color1 { background-color: #ffcccc; }
+#calc-time-comparison .bg-color2 { background-color: #cce5ff; }
+#calc-time-comparison .bg-color3 { background-color: #fff3cd; }
+#calc-time-comparison .bg-color4 { background-color: #cceeff; }
+#calc-time-comparison .bg-color5 { background-color: #e6ccff; }
+
+.visual-comparison {
+    background-color: #f5e8e8;
+}
+
+.visual-comparison p {
+    font-size: 16px;
+    line-height: 1.6;
+    text-align: center;
+    margin-top: 15px;
+    margin-bottom: 15px;
+    padding: 10px;
+    background-color: #e6f3ff;
+    border-radius: 3px;
+}
+
+.graph-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 20px;
+    max-width: 100%;
+    overflow-x: hidden;
+}
+/* .graph-item bar-graph {
+    margin-bottom: 10px;
+} */
+.graph-item {
+    text-align: center;
+    padding: 10px;
+    border-radius: 5px;
+}
+
+.graph-item h4 {
+    margin-top: 10px;
+    color: #2c3e50;
+}
+
+.graph-item canvas {
+    max-width: 100%;
+    max-height: 400px;
+    width: 100%;
+    height: auto;
+    image-rendering: -webkit-optimize-contrast;
+}
+
+.bar-graph {
+    background-color: #e6f3ff;
+}
+
+.bar-graph canvas {
+    max-height: 300px;
+    width: 100%;
+}
+
+.line-graph {
+    background-color: #e6f3ff;
+}
+
+.line-graph canvas {
+    max-height: 300px;
+    width: 100%;
+}
+
+.betterment-comparison {
+    background-color: #f0e6ff;
+}
+
+.betterment-comparison p {
+    font-size: 16px;
+    line-height: 1.6;
+    text-align: center;
+    padding: 10px;
+    background-color: #cceeff;
+    border-radius: 3px;
+}
+
+.pie-graph {
+    background-color: #bbeed0;
+}
+
+.pie-graph canvas {
+    max-height: 300px;
+    width: 100%;
+}
+
+.betterment-comparison #betterment-text p {
+    font-size: 16px;
+    line-height: 1.6;
+    text-align: left;
+    padding: 10px;
+    background-color: #cceeff;
+    border-radius: 3px;
+    margin-top: 10px;
+}
+
+.footer {
+    grid-row: 3;
+    background-color: #2c3e50;
+    color: white;
+    text-align: center;
+    padding: 10px;
+}
+
+@media (max-width: 800px) {
+    .comparison-section {
+        grid-template-columns: 1fr;
+    }
+    .gantt-comparison {
+        grid-template-columns: 1fr;
+    }
+    .calculated-time-comparison {
+        grid-template-columns: 1fr;
+    }
+    .graph-container {
+        grid-template-columns: 1fr;
+    }
+    .bar-graph, .pie-graph, .line-graph {
+        padding: 20px;
+    }
+    .bar-graph canvas, .pie-graph canvas, .line-graph canvas {
+        max-height: 200px;
+        width: 100%;
+        margin: 0 auto;
+    }
+    .gantt-block {
+        font-size: 14px;
+        min-width: 50px;
+    }
+}
+
+@media (min-width: 800px) {
+    .graph-container {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (min-width: 1200px) {
+    .graph-container {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+-------------------------------------
+____/static/compare.js____
+-------------------------------------
+document.addEventListener('DOMContentLoaded', () => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const algo1 = urlParams.get('algo1');
+    const algo2 = urlParams.get('algo2');
+    const formData = new FormData();
+
+    // Populate formData with query parameters (excluding algo1 and algo2)
+    for (const [key, value] of urlParams.entries()) {
+        if (key !== 'algo1' && key !== 'algo2') {
+            formData.append(key, value);
+        }
+    }
+
+    const algo1Title = document.getElementById('algo1-title');
+    const algo2Title = document.getElementById('algo2-title');
+    const ganttChart1 = document.getElementById('gantt-chart-1');
+    const ganttChart2 = document.getElementById('gantt-chart-2');
+    const comparisonTable = document.getElementById('comparison-table');
+    const keyDifferencesTable = document.getElementById('key-differences-table');
+    const calcTimeComparison = document.getElementById('calc-time-comparison');
+    const bettermentText = document.getElementById('betterment-text');
+
+    let charts = {};
+
+    // Set titles
+    algo1Title.textContent = `${algo1} Gantt Chart`;
+    algo2Title.textContent = `${algo2} Gantt Chart`;
+
+    // Fetch data for both algorithms
+    const fetchData = (algo) => {
+        formData.set('algo', algo);
+        return fetch('/', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(err => { throw new Error(err.error); });
+            }
+            return response.json();
+        });
+    };
+
+    // Destroy existing charts
+    function destroyCharts() {
+        Object.values(charts).forEach(chart => {
+            if (chart) chart.destroy();
+        });
+        charts = {};
+    }
+
+    Promise.all([fetchData(algo1), fetchData(algo2)])
+        .then(([data1, data2]) => {
+            // Gantt Charts
+            const renderGanttChart = (ganttChart, timeline) => {
+                ganttChart.innerHTML = '';
+                timeline.forEach(([name, start, end], index) => {
+                    if (index < 100) {
+                        const block = document.createElement('div');
+                        block.className = 'gantt-block';
+                        block.style.width = `${Math.max((end - start) * 80, 20)}px`;
+                        block.innerHTML = `${name}<br>(${start}-${end})`;
+                        ganttChart.appendChild(block);
+                        block.style.animationDelay = `${index * 0.5}s`;
+                    }
+                });
+            };
+
+            renderGanttChart(ganttChart1, data1.timeline);
+            renderGanttChart(ganttChart2, data2.timeline);
+
+            // Comparison Details Table
+            let tableHTML = '<table><tr><th>Process</th>';
+            tableHTML += `<th>${algo1} CT</th><th>${algo1} TAT</th><th>${algo1} WT</th>`;
+            tableHTML += `<th>${algo2} CT</th><th>${algo2} TAT</th><th>${algo2} WT</th></tr>`;
+            data1.metrics.forEach((m1, index) => {
+                const m2 = data2.metrics[index];
+                tableHTML += `<tr><td>${m1.name}</td>`;
+                tableHTML += `<td>${m1.ct}</td><td>${m1.tat}</td><td>${m1.wt}</td>`;
+                tableHTML += `<td>${m2.ct}</td><td>${m2.tat}</td><td>${m2.wt}</td></tr>`;
+            });
+            tableHTML += '</table>';
+            comparisonTable.innerHTML = tableHTML;
+
+            // Key Differences Table
+            const getAlgorithmTraits = (algo) => {
+                switch (algo) {
+                    case "FCFS Non-Preemptive":
+                        return {
+                            approach: "First-Come, First-Served",
+                            preemption: "No",
+                            fairness: "Poor (convoy effect)",
+                            issues: "Long waiting times for short processes behind long ones"
+                        };
+                    case "FCFS Preemptive":
+                        return {
+                            approach: "First-Come, First-Served with time slicing",
+                            preemption: "Yes",
+                            fairness: "Moderate",
+                            issues: "Context-switching overhead"
+                        };
+                    case "SJF Non-Preemptive":
+                        return {
+                            approach: "Shortest Job First",
+                            preemption: "No",
+                            fairness: "Poor (starvation risk)",
+                            issues: "Requires burst time prediction"
+                        };
+                    case "SRTF":
+                        return {
+                            approach: "Shortest Remaining Time First",
+                            preemption: "Yes",
+                            fairness: "Poor (starvation risk)",
+                            issues: "High context-switching overhead"
+                        };
+                    case "RR Non-Preemptive":
+                        return {
+                            approach: "Round Robin",
+                            preemption: "No within quantum",
+                            fairness: "Good",
+                            issues: "Larger waiting times for long processes"
+                        };
+                    case "RR Preemptive":
+                        return {
+                            approach: "Round Robin",
+                            preemption: "Yes",
+                            fairness: "Good",
+                            issues: "Context-switching overhead with small quantum"
+                        };
+                    case "Priority Non-Preemptive":
+                        return {
+                            approach: "Priority-based",
+                            preemption: "No",
+                            fairness: "Poor (starvation risk)",
+                            issues: "Low-priority processes may wait indefinitely"
+                        };
+                    case "Priority Preemptive":
+                        return {
+                            approach: "Priority-based",
+                            preemption: "Yes",
+                            fairness: "Poor (starvation risk)",
+                            issues: "High context-switching overhead"
+                        };
+                    case "Multilevel Queue":
+                        return {
+                            approach: "Priority-based queues (Foreground: RR, Background: FCFS)",
+                            preemption: "Yes in foreground",
+                            fairness: "Moderate (background starvation)",
+                            issues: "Background processes may wait if foreground is busy"
+                        };
+                    case "Multilevel Feedback Queue":
+                        return {
+                            approach: "Dynamic queues with feedback",
+                            preemption: "Yes",
+                            fairness: "Good (anti-starvation via feedback)",
+                            issues: "Complex implementation"
+                        };
+                    default:
+                        return {
+                            approach: "Unknown",
+                            preemption: "Unknown",
+                            fairness: "Unknown",
+                            issues: "Unknown"
+                        };
+                }
+            };
+
+            const traits1 = getAlgorithmTraits(algo1);
+            const traits2 = getAlgorithmTraits(algo2);
+            let keyDiffHTML = '<table><tr><th>Aspect</th><th>' + algo1 + '</th><th>' + algo2 + '</th></tr>';
+            keyDiffHTML += `<tr><td>Scheduling Approach</td><td>${traits1.approach}</td><td>${traits2.approach}</td></tr>`;
+            keyDiffHTML += `<tr><td>Preemption</td><td>${traits1.preemption}</td><td>${traits2.preemption}</td></tr>`;
+            keyDiffHTML += `<tr><td>Fairness</td><td>${traits1.fairness}</td><td>${traits2.fairness}</td></tr>`;
+            keyDiffHTML += `<tr><td>Potential Issues</td><td>${traits1.issues}</td><td>${traits2.issues}</td></tr>`;
+            keyDiffHTML += '</table>';
+            keyDifferencesTable.innerHTML = keyDiffHTML;
+
+            // Calculated Time Comparison
+            const avgTat1 = (data1.total_tat / data1.metrics.length).toFixed(2);
+            const avgWt1 = (data1.total_wt / data1.metrics.length).toFixed(2);
+            const avgTat2 = (data2.total_tat / data2.metrics.length).toFixed(2);
+            const avgWt2 = (data2.total_wt / data2.metrics.length).toFixed(2);
+
+            calcTimeComparison.innerHTML = `
+                <div class="calc-time-item">
+                    <h3>${algo1}</h3>
+                    <div class="subtext bg-color1"><strong>Total Burst Time:</strong> ${data1.total_bt}</div>
+                    <div class="subtext bg-color2"><strong>Total Turnaround Time:</strong> ${data1.total_tat}</div>
+                    <div class="subtext bg-color3"><strong>Total Waiting Time:</strong> ${data1.total_wt}</div>
+                    <div class="subtext bg-color4"><strong>Average Turnaround Time:</strong> ${avgTat1}</div>
+                    <div class="subtext bg-color5"><strong>Average Waiting Time:</strong> ${avgWt1}</div>
+                </div>
+                <div class="calc-time-item">
+                    <h3>${algo2}</h3>
+                    <div class="subtext bg-color1"><strong>Total Burst Time:</strong> ${data2.total_bt}</div>
+                    <div class="subtext bg-color2"><strong>Total Turnaround Time:</strong> ${data2.total_tat}</div>
+                    <div class="subtext bg-color3"><strong>Total Waiting Time:</strong> ${data2.total_wt}</div>
+                    <div class="subtext bg-color4"><strong>Average Turnaround Time:</strong> ${avgTat2}</div>
+                    <div class="subtext bg-color5"><strong>Average Waiting Time:</strong> ${avgWt2}</div>
+                </div>
+            `;
+
+            // Visual Comparison (Bar Charts and Line Graphs)
+            const isMobile = window.innerWidth <= 800;
+            const chartOptions = {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'top',
+                        labels: {
+                            font: {
+                                size: isMobile ? 10 : 12
+                            }
+                        }
+                    }
+                },
+                layout: {
+                    padding: {
+                        left: isMobile ? 40 : 20,
+                        right: 20,
+                        top: 10,
+                        bottom: 10
+                    }
+                },
+                scales: {
+                    x: {
+                        ticks: {
+                            font: {
+                                size: isMobile ? 10 : 12
+                            },
+                            maxRotation: isMobile ? 45 : 0,
+                            minRotation: isMobile ? 45 : 0
+                        }
+                    },
+                    y: {
+                        beginAtZero: true,
+                        ticks: {
+                            font: {
+                                size: isMobile ? 10 : 12
+                            }
+                        }
+                    }
+                }
+            };
+
+            destroyCharts();
+
+            // Bar Charts with Two Distinct Colors
+            charts['tat-comparison-chart'] = new Chart(document.getElementById('tat-comparison-chart'), {
+                type: 'bar',
+                data: {
+                    labels: [algo1, algo2],
+                    datasets: [{
+                        label: 'Average Turnaround Time',
+                        data: [avgTat1, avgTat2],
+                        backgroundColor: ['#ff6384', '#36a2eb'],
+                        borderColor: ['#ff6384', '#36a2eb'],
+                        borderWidth: 1
+                    }]
+                },
+                options: chartOptions
+            });
+
+            charts['wt-comparison-chart'] = new Chart(document.getElementById('wt-comparison-chart'), {
+                type: 'bar',
+                data: {
+                    labels: [algo1, algo2],
+                    datasets: [{
+                        label: 'Average Waiting Time',
+                        data: [avgWt1, avgWt2],
+                        backgroundColor: ['#ff6384', '#36a2eb'],
+                        borderColor: ['#ff6384', '#36a2eb'],
+                        borderWidth: 1
+                    }]
+                },
+                options: chartOptions
+            });
+
+            // Separate Line Graphs for TAT and WT
+            charts['tat-line-chart'] = new Chart(document.getElementById('tat-line-chart'), {
+                type: 'line',
+                data: {
+                    labels: [algo1, algo2],
+                    datasets: [{
+                        label: 'Average Turnaround Time',
+                        data: [avgTat1, avgTat2],
+                        borderColor: '#ff6384',
+                        backgroundColor: '#ff6384',
+                        fill: false,
+                        tension: 0.1
+                    }]
+                },
+                options: chartOptions
+            });
+
+            charts['wt-line-chart'] = new Chart(document.getElementById('wt-line-chart'), {
+                type: 'line',
+                data: {
+                    labels: [algo1, algo2],
+                    datasets: [{
+                        label: 'Average Waiting Time',
+                        data: [avgWt1, avgWt2],
+                        borderColor: '#36a2eb',
+                        backgroundColor: '#36a2eb',
+                        fill: false,
+                        tension: 0.1
+                    }]
+                },
+                options: chartOptions
+            });
+
+            // Betterment Comparison - Pie Charts
+            const pieChartOptions = {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        position: 'bottom',
+                        labels: {
+                            font: {
+                                size: isMobile ? 10 : 12
+                            }
+                        }
+                    }
+                }
+            };
+
+            charts['tat-pie-chart'] = new Chart(document.getElementById('tat-pie-chart'), {
+                type: 'pie',
+                data: {
+                    labels: [algo1, algo2],
+                    datasets: [{
+                        label: 'Average Turnaround Time Proportion',
+                        data: [avgTat1, avgTat2],
+                        backgroundColor: ['#ff6384', '#36a2eb']
+                    }]
+                },
+                options: pieChartOptions
+            });
+
+            charts['wt-pie-chart'] = new Chart(document.getElementById('wt-pie-chart'), {
+                type: 'pie',
+                data: {
+                    labels: [algo1, algo2],
+                    datasets: [{
+                        label: 'Average Waiting Time Proportion',
+                        data: [avgWt1, avgWt2],
+                        backgroundColor: ['#ff6384', '#36a2eb']
+                    }]
+                },
+                options: pieChartOptions
+            });
+
+            // Betterment Comparison Text
+            let betterment = '';
+            if (parseFloat(avgTat1) < parseFloat(avgTat2) && parseFloat(avgWt1) < parseFloat(avgWt2)) {
+                betterment = `${algo1} performs better overall with lower average turnaround time (${avgTat1} vs ${avgTat2}) and waiting time (${avgWt1} vs ${avgWt2}).`;
+            } else if (parseFloat(avgTat2) < parseFloat(avgTat1) && parseFloat(avgWt2) < parseFloat(avgWt1)) {
+                betterment = `${algo2} performs better overall with lower average turnaround time (${avgTat2} vs ${avgTat1}) and waiting time (${avgWt2} vs ${avgWt1}).`;
+            } else {
+                betterment = `Mixed results: `;
+                if (parseFloat(avgTat1) < parseFloat(avgTat2)) {
+                    betterment += `${algo1} has a better average turnaround time (${avgTat1} vs ${avgTat2}), `;
+                } else {
+                    betterment += `${algo2} has a better average turnaround time (${avgTat2} vs ${avgTat1}), `;
+                }
+                if (parseFloat(avgWt1) < parseFloat(avgWt2)) {
+                    betterment += `while ${algo1} has a better average waiting time (${avgWt1} vs ${avgWt2}).`;
+                } else {
+                    betterment += `while ${algo2} has a better average waiting time (${avgWt2} vs ${avgWt1}).`;
+                }
+            }
+
+            // Enhanced Betterment Text
+            const tatDiff = Math.abs(avgTat1 - avgTat2).toFixed(2);
+            const wtDiff = Math.abs(avgWt1 - avgWt2).toFixed(2);
+            const tatImprovement = avgTat1 != 0 && avgTat2 != 0 ? ((Math.max(avgTat1, avgTat2) - Math.min(avgTat1, avgTat2)) / Math.max(avgTat1, avgTat2) * 100).toFixed(2) : 0;
+            const wtImprovement = avgWt1 != 0 && avgWt2 != 0 ? ((Math.max(avgWt1, avgWt2) - Math.min(avgWt1, avgWt2)) / Math.max(avgWt1, avgWt2) * 100).toFixed(2) : 0;
+            const betterTatAlgo = parseFloat(avgTat1) < parseFloat(avgTat2) ? algo1 : algo2;
+            const betterWtAlgo = parseFloat(avgWt1) < parseFloat(avgWt2) ? algo1 : algo2;
+
+            betterment += `<p><strong>Performance Details:</strong> ${betterTatAlgo} has a better average Turnaround Time (${betterTatAlgo === algo1 ? avgTat1 : avgTat2} vs ${betterTatAlgo === algo1 ? avgTat2 : avgTat1}), with a difference of ${tatDiff} units (${tatImprovement}% improvement). Meanwhile, ${betterWtAlgo} has a better average Waiting Time (${betterWtAlgo === algo1 ? avgWt1 : avgWt2} vs ${betterWtAlgo === algo1 ? avgWt2 : avgWt1}), with a difference of ${wtDiff} units (${wtImprovement}% improvement).</p>`;
+
+            // Workload Recommendations
+            betterment += `<p><strong>Workload Recommendations:</strong> `;
+            if (algo1.includes("SJF") || algo1.includes("SRTF")) {
+                betterment += `${algo1} is ideal for workloads with predictable, short burst times (e.g., batch processing), but may struggle with I/O-bound tasks due to potential starvation. `;
+            } else if (algo1.includes("RR") || algo1.includes("Multilevel")) {
+                betterment += `${algo1} suits interactive systems with I/O-bound processes (e.g., time-sharing environments), offering better fairness and responsiveness. `;
+            } else if (algo1.includes("Priority")) {
+                betterment += `${algo1} is best for systems with critical tasks needing immediate attention (e.g., real-time systems), but requires careful priority management to avoid starvation. `;
+            } else {
+                betterment += `${algo1} works well for simple, sequential workloads (e.g., basic batch jobs), but may not handle mixed workloads efficiently. `;
+            }
+
+            if (algo2.includes("SJF") || algo2.includes("SRTF")) {
+                betterment += `${algo2} excels in environments with short, predictable jobs (e.g., batch processing), but risks starving longer tasks in I/O-heavy systems.`;
+            } else if (algo2.includes("RR") || algo2.includes("Multilevel")) {
+                betterment += `${algo2} is better for interactive, I/O-bound workloads (e.g., user-facing applications), ensuring fairness and quick response times.`;
+            } else if (algo2.includes("Priority")) {
+                betterment += `${algo2} fits systems with prioritized tasks (e.g., real-time applications), but needs mechanisms to prevent low-priority process delays.`;
+            } else {
+                betterment += `${algo2} is suitable for straightforward, sequential workloads (e.g., simple batch processing), but may lead to delays in diverse systems.`;
+            }
+            betterment += `</p>`;
+
+            // Algorithm-Specific Traits for Differentiation
+            betterment += `<p><strong>Additional Considerations:</strong> Even if numerical results are similar, algorithm traits differ significantly. <br><br>`;
+            betterment += `<strong>${algo1}</strong> has the following characteristics: <br>&emsp; 1.${traits1.issues}. <br>Its preemption policy (${traits1.preemption}) impacts context-switching overhead, which can affect performance in high-frequency task-switching scenarios.<br><br>`;
+            betterment += `<strong>${algo2}</strong>, on the other hand, faces these challenges: <br>&emsp; 1.${traits2.issues}. <br>Its preemption policy (${traits2.preemption}) influences responsiveness and system overhead differently. <br><br>`;
+            betterment += `<strong>For example</strong>, in a system with frequent arrivals, preemptive algorithms may incur more context switches, while non-preemptive ones might cause delays. Choose based on your system's task arrival patterns, process mix, and performance goals (e.g., minimizing TAT for batch jobs or WT for interactive tasks).</p>`;
+
+            bettermentText.innerHTML = `<p>${betterment}</p>`;
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert(error.message || 'An error occurred while running the comparison.');
+        });
+});

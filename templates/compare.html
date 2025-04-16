@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Compare Scheduling Algorithms</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='compare.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header class="title">
+            <h1>Compare Scheduling Algorithms</h1>
+        </header>
+
+        <main class="comparison-visualizer">
+            <section class="comparison-section">
+                <div class="gantt-comparison">
+                    <div class="gantt-item">
+                        <h2 id="algo1-title">Algorithm 1 Gantt Chart</h2>
+                        <div id="gantt-chart-1"></div>
+                    </div>
+                    <div class="gantt-item">
+                        <h2 id="algo2-title">Algorithm 2 Gantt Chart</h2>
+                        <div id="gantt-chart-2"></div>
+                    </div>
+                </div>
+
+                <div class="comparison-details">
+                    <h2>Comparison Details Table</h2>
+                    <div id="comparison-table"></div>
+                </div>
+
+                <div class="key-differences">
+                    <h2>Key Differences Between Algorithms</h2>
+                    <div id="key-differences-table"></div>
+                </div>
+
+                <div class="calculated-time-comparison">
+                    <h2>Calculated Time Comparison</h2>
+                    <div id="calc-time-comparison"></div>
+                </div>
+
+                <div class="visual-comparison">
+                    <h2>Visual Comparison</h2>
+                    <p>The following bar charts compare the average Turnaround Time (TAT) and Waiting Time (WT) between the two algorithms. TAT measures the total time a process takes from arrival to completion, while WT indicates the time a process spends waiting in the queue. Lower values are generally better for both metrics.</p>
+                    <div class="graph-container">
+                        <div class="graph-item bar-graph">
+                            <canvas id="tat-comparison-chart"></canvas>
+                            <h4>Average Turnaround Time Comparison</h4>
+                        </div>
+                        <div class="graph-item bar-graph">
+                            <canvas id="wt-comparison-chart"></canvas>
+                            <h4>Average Waiting Time Comparison</h4>
+                        </div>
+                    </div>
+                    <p>The line graphs below illustrate the trends of average Turnaround Time (TAT) and Waiting Time (WT) across the two algorithms, providing a visual comparison of their performance metrics.</p>
+                    <div class="graph-container">
+                        <div class="graph-item line-graph">
+                            <canvas id="tat-line-chart"></canvas>
+                            <h4>TAT Trend Comparison</h4>
+                        </div>
+                        <div class="graph-item line-graph">
+                            <canvas id="wt-line-chart"></canvas>
+                            <h4>WT Trend Comparison</h4>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="betterment-comparison">
+                    <h2>Betterment Comparison</h2>
+                    <p>The pie charts below illustrate the proportional contribution of each algorithm to the average Turnaround Time (TAT) and Waiting Time (WT). A smaller proportion indicates better performance in that metric.</p>
+                    <div class="graph-container">
+                        <div class="graph-item pie-graph">
+                            <canvas id="tat-pie-chart"></canvas>
+                            <h4>TAT Proportion</h4>
+                        </div>
+                        <div class="graph-item pie-graph">
+                            <canvas id="wt-pie-chart"></canvas>
+                            <h4>WT Proportion</h4>
+                        </div>
+                    </div>
+                    <div id="betterment-text"></div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <p>© 2025 Scheduling Algorithm Visualizer Team | Daffodil International University</p>
+        </footer>
+    </div>
+    <script src="{{ url_for('static', filename='compare.js') }}"></script>
+</body>
+</html>
